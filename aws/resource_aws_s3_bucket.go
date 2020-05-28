@@ -15,12 +15,15 @@ import (
 	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/aws/endpoints"
 	"github.com/aws/aws-sdk-go/service/s3"
-	"github.com/hashicorp/terraform/helper/hashcode"
-	"github.com/hashicorp/terraform/helper/resource"
-	"github.com/hashicorp/terraform/helper/schema"
-	"github.com/hashicorp/terraform/helper/structure"
-	"github.com/hashicorp/terraform/helper/validation"
+	"github.com/hashicorp/terraform-plugin-sdk/helper/hashcode"
+	"github.com/hashicorp/terraform-plugin-sdk/helper/resource"
+	"github.com/hashicorp/terraform-plugin-sdk/helper/schema"
+	"github.com/hashicorp/terraform-plugin-sdk/helper/structure"
+	"github.com/hashicorp/terraform-plugin-sdk/helper/validation"
+	"github.com/terraform-providers/terraform-provider-aws/aws/internal/keyvaluetags"
 )
+
+const s3BucketCreationTimeout = 2 * time.Minute
 
 func resourceAwsS3Bucket() *schema.Resource {
 	return &schema.Resource{
@@ -66,15 +69,59 @@ func resourceAwsS3Bucket() *schema.Resource {
 			},
 
 			"acl": {
-				Type:     schema.TypeString,
-				Default:  "private",
-				Optional: true,
+				Type:          schema.TypeString,
+				Default:       "private",
+				Optional:      true,
+				ConflictsWith: []string{"grant"},
+			},
+
+			"grant": {
+				Type:          schema.TypeSet,
+				Optional:      true,
+				Set:           grantHash,
+				ConflictsWith: []string{"acl"},
+				Elem: &schema.Resource{
+					Schema: map[string]*schema.Schema{
+						"id": {
+							Type:     schema.TypeString,
+							Optional: true,
+						},
+						"type": {
+							Type:     schema.TypeString,
+							Required: true,
+							ValidateFunc: validation.StringInSlice([]string{
+								s3.TypeCanonicalUser,
+								s3.TypeGroup,
+							}, false),
+						},
+						"uri": {
+							Type:     schema.TypeString,
+							Optional: true,
+						},
+
+						"permissions": {
+							Type:     schema.TypeSet,
+							Required: true,
+							Set:      schema.HashString,
+							Elem: &schema.Schema{
+								Type: schema.TypeString,
+								ValidateFunc: validation.StringInSlice([]string{
+									s3.PermissionFullControl,
+									s3.PermissionRead,
+									s3.PermissionReadAcp,
+									s3.PermissionWrite,
+									s3.PermissionWriteAcp,
+								}, false),
+							},
+						},
+					},
+				},
 			},
 
 			"policy": {
 				Type:             schema.TypeString,
 				Optional:         true,
-				ValidateFunc:     validation.ValidateJsonString,
+				ValidateFunc:     validation.StringIsJSON,
 				DiffSuppressFunc: suppressEquivalentAwsPolicyDiffs,
 			},
 
@@ -140,7 +187,7 @@ func resourceAwsS3Bucket() *schema.Resource {
 						"routing_rules": {
 							Type:         schema.TypeString,
 							Optional:     true,
-							ValidateFunc: validation.ValidateJsonString,
+							ValidateFunc: validation.StringIsJSON,
 							StateFunc: func(v interface{}) string {
 								json, _ := structure.NormalizeJsonString(v)
 								return json
@@ -567,8 +614,8 @@ func resourceAwsS3Bucket() *schema.Resource {
 													Type:     schema.TypeString,
 													Required: true,
 													ValidateFunc: validation.StringInSlice([]string{
-														s3.ObjectLockModeGovernance,
-														s3.ObjectLockModeCompliance,
+														s3.ObjectLockRetentionModeGovernance,
+														s3.ObjectLockRetentionModeCompliance,
 													}, false),
 												},
 
@@ -611,13 +658,17 @@ func resourceAwsS3BucketCreate(d *schema.ResourceData, meta interface{}) error {
 		bucket = resource.UniqueId()
 	}
 	d.Set("bucket", bucket)
-	acl := d.Get("acl").(string)
 
-	log.Printf("[DEBUG] S3 bucket create: %s, ACL: %s", bucket, acl)
+	log.Printf("[DEBUG] S3 bucket create: %s", bucket)
 
 	req := &s3.CreateBucketInput{
 		Bucket: aws.String(bucket),
-		ACL:    aws.String(acl),
+	}
+
+	if acl, ok := d.GetOk("acl"); ok {
+		acl := acl.(string)
+		req.ACL = aws.String(acl)
+		log.Printf("[DEBUG] S3 bucket %s has canned ACL %s", bucket, acl)
 	}
 
 	var awsRegion string
@@ -653,8 +704,7 @@ func resourceAwsS3BucketCreate(d *schema.ResourceData, meta interface{}) error {
 			if awsErr.Code() == "OperationAborted" {
 				log.Printf("[WARN] Got an error while trying to create S3 bucket %s: %s", bucket, err)
 				return resource.RetryableError(
-					fmt.Errorf("Error creating S3 bucket %s, retrying: %s",
-						bucket, err))
+					fmt.Errorf("Error creating S3 bucket %s, retrying: %s", bucket, err))
 			}
 		}
 		if err != nil {
@@ -663,7 +713,9 @@ func resourceAwsS3BucketCreate(d *schema.ResourceData, meta interface{}) error {
 
 		return nil
 	})
-
+	if isResourceTimeoutError(err) {
+		_, err = s3conn.CreateBucket(req)
+	}
 	if err != nil {
 		return fmt.Errorf("Error creating S3 bucket: %s", err)
 	}
@@ -675,8 +727,18 @@ func resourceAwsS3BucketCreate(d *schema.ResourceData, meta interface{}) error {
 
 func resourceAwsS3BucketUpdate(d *schema.ResourceData, meta interface{}) error {
 	s3conn := meta.(*AWSClient).s3conn
-	if err := setTagsS3(s3conn, d); err != nil {
-		return fmt.Errorf("%q: %s", d.Get("bucket").(string), err)
+
+	if d.HasChange("tags") {
+		o, n := d.GetChange("tags")
+
+		// Retry due to S3 eventual consistency
+		_, err := retryOnAwsCode(s3.ErrCodeNoSuchBucket, func() (interface{}, error) {
+			terr := keyvaluetags.S3BucketUpdateTags(s3conn, d.Id(), o, n)
+			return nil, terr
+		})
+		if err != nil {
+			return fmt.Errorf("error updating S3 Bucket (%s) tags: %s", d.Id(), err)
+		}
 	}
 
 	if d.HasChange("policy") {
@@ -704,6 +766,12 @@ func resourceAwsS3BucketUpdate(d *schema.ResourceData, meta interface{}) error {
 	}
 	if d.HasChange("acl") && !d.IsNewResource() {
 		if err := resourceAwsS3BucketAclUpdate(s3conn, d); err != nil {
+			return err
+		}
+	}
+
+	if d.HasChange("grant") {
+		if err := resourceAwsS3BucketGrantsUpdate(s3conn, d); err != nil {
 			return err
 		}
 	}
@@ -755,20 +823,41 @@ func resourceAwsS3BucketUpdate(d *schema.ResourceData, meta interface{}) error {
 
 func resourceAwsS3BucketRead(d *schema.ResourceData, meta interface{}) error {
 	s3conn := meta.(*AWSClient).s3conn
+	ignoreTagsConfig := meta.(*AWSClient).IgnoreTagsConfig
 
-	var err error
+	input := &s3.HeadBucketInput{
+		Bucket: aws.String(d.Id()),
+	}
 
-	_, err = retryOnAwsCode(s3.ErrCodeNoSuchBucket, func() (interface{}, error) {
-		return s3conn.HeadBucket(&s3.HeadBucketInput{
-			Bucket: aws.String(d.Id()),
-		})
-	})
-	if err != nil {
-		if awsError, ok := err.(awserr.RequestFailure); ok && awsError.StatusCode() == 404 {
-			log.Printf("[WARN] S3 Bucket (%s) not found, error code (404)", d.Id())
-			d.SetId("")
-			return nil
+	err := resource.Retry(s3BucketCreationTimeout, func() *resource.RetryError {
+		_, err := s3conn.HeadBucket(input)
+
+		if d.IsNewResource() && isAWSErrRequestFailureStatusCode(err, 404) {
+			return resource.RetryableError(err)
 		}
+
+		if d.IsNewResource() && isAWSErr(err, s3.ErrCodeNoSuchBucket, "") {
+			return resource.RetryableError(err)
+		}
+
+		if err != nil {
+			return resource.NonRetryableError(err)
+		}
+
+		return nil
+	})
+
+	if isResourceTimeoutError(err) {
+		_, err = s3conn.HeadBucket(input)
+	}
+
+	if isAWSErrRequestFailureStatusCode(err, 404) || isAWSErr(err, s3.ErrCodeNoSuchBucket, "") {
+		log.Printf("[WARN] S3 Bucket (%s) not found, removing from state", d.Id())
+		d.SetId("")
+		return nil
+	}
+
+	if err != nil {
 		return fmt.Errorf("error reading S3 Bucket (%s): %s", d.Id(), err)
 	}
 
@@ -777,7 +866,7 @@ func resourceAwsS3BucketRead(d *schema.ResourceData, meta interface{}) error {
 		d.Set("bucket", d.Id())
 	}
 
-	d.Set("bucket_domain_name", bucketDomainName(d.Get("bucket").(string)))
+	d.Set("bucket_domain_name", meta.(*AWSClient).PartitionHostname(fmt.Sprintf("%s.s3", d.Get("bucket").(string))))
 
 	// Read the policy
 	if _, ok := d.GetOk("policy"); ok {
@@ -804,6 +893,27 @@ func resourceAwsS3BucketRead(d *schema.ResourceData, meta interface{}) error {
 				}
 				d.Set("policy", policy)
 			}
+		}
+	}
+
+	//Read the Grant ACL. Reset if `acl` (canned ACL) is set.
+	if acl, ok := d.GetOk("acl"); ok && acl.(string) != "private" {
+		if err := d.Set("grant", nil); err != nil {
+			return fmt.Errorf("error resetting grant %s", err)
+		}
+	} else {
+		apResponse, err := retryOnAwsCode("NoSuchBucket", func() (interface{}, error) {
+			return s3conn.GetBucketAcl(&s3.GetBucketAclInput{
+				Bucket: aws.String(d.Id()),
+			})
+		})
+		if err != nil {
+			return fmt.Errorf("error getting S3 Bucket (%s) ACL: %s", d.Id(), err)
+		}
+		log.Printf("[DEBUG] S3 bucket: %s, read ACL grants policy: %+v", d.Id(), apResponse)
+		grants := flattenGrants(apResponse.(*s3.GetBucketAclOutput))
+		if err := d.Set("grant", schema.NewSet(grantHash, grants)); err != nil {
+			return fmt.Errorf("error setting grant %s", err)
 		}
 	}
 
@@ -1027,7 +1137,7 @@ func resourceAwsS3BucketRead(d *schema.ResourceData, meta interface{}) error {
 					}
 					// Tag
 					if len(filter.And.Tags) > 0 {
-						rule["tags"] = tagsToMapS3(filter.And.Tags)
+						rule["tags"] = keyvaluetags.S3KeyValueTags(filter.And.Tags).IgnoreAws().Map()
 					}
 				} else {
 					// Prefix
@@ -1036,7 +1146,7 @@ func resourceAwsS3BucketRead(d *schema.ResourceData, meta interface{}) error {
 					}
 					// Tag
 					if filter.Tag != nil {
-						rule["tags"] = tagsToMapS3([]*s3.Tag{filter.Tag})
+						rule["tags"] = keyvaluetags.S3KeyValueTags([]*s3.Tag{filter.Tag}).IgnoreAws().Map()
 					}
 				}
 			} else {
@@ -1209,7 +1319,7 @@ func resourceAwsS3BucketRead(d *schema.ResourceData, meta interface{}) error {
 	}
 
 	// Add website_endpoint as an attribute
-	websiteEndpoint, err := websiteEndpoint(s3conn, d)
+	websiteEndpoint, err := websiteEndpoint(meta.(*AWSClient), d)
 	if err != nil {
 		return err
 	}
@@ -1222,13 +1332,17 @@ func resourceAwsS3BucketRead(d *schema.ResourceData, meta interface{}) error {
 		}
 	}
 
-	tagSet, err := getTagSetS3(s3conn, d.Id())
+	// Retry due to S3 eventual consistency
+	tags, err := retryOnAwsCode(s3.ErrCodeNoSuchBucket, func() (interface{}, error) {
+		return keyvaluetags.S3BucketListTags(s3conn, d.Id())
+	})
+
 	if err != nil {
-		return err
+		return fmt.Errorf("error listing tags for S3 Bucket (%s): %s", d.Id(), err)
 	}
 
-	if err := d.Set("tags", tagsToMapS3(tagSet)); err != nil {
-		return err
+	if err := d.Set("tags", tags.(keyvaluetags.KeyValueTags).IgnoreAws().IgnoreConfig(ignoreTagsConfig).Map()); err != nil {
+		return fmt.Errorf("error setting tags: %s", err)
 	}
 
 	arn := arn.ARN{
@@ -1255,52 +1369,25 @@ func resourceAwsS3BucketDelete(d *schema.ResourceData, meta interface{}) error {
 
 	if isAWSErr(err, "BucketNotEmpty", "") {
 		if d.Get("force_destroy").(bool) {
+			// Use a S3 service client that can handle multiple slashes in URIs.
+			// While aws_s3_bucket_object resources cannot create these object
+			// keys, other AWS services and applications using the S3 Bucket can.
+			s3conn = meta.(*AWSClient).s3connUriCleaningDisabled
+
 			// bucket may have things delete them
 			log.Printf("[DEBUG] S3 Bucket attempting to forceDestroy %+v", err)
 
-			bucket := d.Get("bucket").(string)
-			resp, err := s3conn.ListObjectVersions(
-				&s3.ListObjectVersionsInput{
-					Bucket: aws.String(bucket),
-				},
-			)
+			// Delete everything including locked objects.
+			// Don't ignore any object errors or we could recurse infinitely.
+			var objectLockEnabled bool
+			objectLockConfiguration := expandS3ObjectLockConfiguration(d.Get("object_lock_configuration").([]interface{}))
+			if objectLockConfiguration != nil {
+				objectLockEnabled = aws.StringValue(objectLockConfiguration.ObjectLockEnabled) == s3.ObjectLockEnabledEnabled
+			}
+			err = deleteAllS3ObjectVersions(s3conn, d.Id(), "", objectLockEnabled, false)
 
 			if err != nil {
-				return fmt.Errorf("Error S3 Bucket list Object Versions err: %s", err)
-			}
-
-			objectsToDelete := make([]*s3.ObjectIdentifier, 0)
-
-			if len(resp.DeleteMarkers) != 0 {
-
-				for _, v := range resp.DeleteMarkers {
-					objectsToDelete = append(objectsToDelete, &s3.ObjectIdentifier{
-						Key:       v.Key,
-						VersionId: v.VersionId,
-					})
-				}
-			}
-
-			if len(resp.Versions) != 0 {
-				for _, v := range resp.Versions {
-					objectsToDelete = append(objectsToDelete, &s3.ObjectIdentifier{
-						Key:       v.Key,
-						VersionId: v.VersionId,
-					})
-				}
-			}
-
-			params := &s3.DeleteObjectsInput{
-				Bucket: aws.String(bucket),
-				Delete: &s3.Delete{
-					Objects: objectsToDelete,
-				},
-			}
-
-			_, err = s3conn.DeleteObjects(params)
-
-			if err != nil {
-				return fmt.Errorf("Error S3 Bucket force_destroy error deleting: %s", err)
+				return fmt.Errorf("error S3 Bucket force_destroy: %s", err)
 			}
 
 			// this line recurses until all objects are deleted or an error is returned
@@ -1328,17 +1415,18 @@ func resourceAwsS3BucketPolicyUpdate(s3conn *s3.S3, d *schema.ResourceData) erro
 		}
 
 		err := resource.Retry(1*time.Minute, func() *resource.RetryError {
-			if _, err := s3conn.PutBucketPolicy(params); err != nil {
-				if awserr, ok := err.(awserr.Error); ok {
-					if awserr.Code() == "MalformedPolicy" || awserr.Code() == s3.ErrCodeNoSuchBucket {
-						return resource.RetryableError(awserr)
-					}
-				}
+			_, err := s3conn.PutBucketPolicy(params)
+			if isAWSErr(err, "MalformedPolicy", "") || isAWSErr(err, s3.ErrCodeNoSuchBucket, "") {
+				return resource.RetryableError(err)
+			}
+			if err != nil {
 				return resource.NonRetryableError(err)
 			}
 			return nil
 		})
-
+		if isResourceTimeoutError(err) {
+			_, err = s3conn.PutBucketPolicy(params)
+		}
 		if err != nil {
 			return fmt.Errorf("Error putting S3 policy: %s", err)
 		}
@@ -1355,6 +1443,74 @@ func resourceAwsS3BucketPolicyUpdate(s3conn *s3.S3, d *schema.ResourceData) erro
 		}
 	}
 
+	return nil
+}
+
+func resourceAwsS3BucketGrantsUpdate(s3conn *s3.S3, d *schema.ResourceData) error {
+	bucket := d.Get("bucket").(string)
+	rawGrants := d.Get("grant").(*schema.Set).List()
+
+	if len(rawGrants) == 0 {
+		log.Printf("[DEBUG] S3 bucket: %s, Grants fallback to canned ACL", bucket)
+		if err := resourceAwsS3BucketAclUpdate(s3conn, d); err != nil {
+			return fmt.Errorf("Error fallback to canned ACL, %s", err)
+		}
+	} else {
+		apResponse, err := retryOnAwsCode("NoSuchBucket", func() (interface{}, error) {
+			return s3conn.GetBucketAcl(&s3.GetBucketAclInput{
+				Bucket: aws.String(d.Id()),
+			})
+		})
+
+		if err != nil {
+			return fmt.Errorf("error getting S3 Bucket (%s) ACL: %s", d.Id(), err)
+		}
+
+		ap := apResponse.(*s3.GetBucketAclOutput)
+		log.Printf("[DEBUG] S3 bucket: %s, read ACL grants policy: %+v", d.Id(), ap)
+
+		grants := make([]*s3.Grant, 0, len(rawGrants))
+		for _, rawGrant := range rawGrants {
+			log.Printf("[DEBUG] S3 bucket: %s, put grant: %#v", bucket, rawGrant)
+			grantMap := rawGrant.(map[string]interface{})
+			for _, rawPermission := range grantMap["permissions"].(*schema.Set).List() {
+				ge := &s3.Grantee{}
+				if i, ok := grantMap["id"].(string); ok && i != "" {
+					ge.SetID(i)
+				}
+				if t, ok := grantMap["type"].(string); ok && t != "" {
+					ge.SetType(t)
+				}
+				if u, ok := grantMap["uri"].(string); ok && u != "" {
+					ge.SetURI(u)
+				}
+
+				g := &s3.Grant{
+					Grantee:    ge,
+					Permission: aws.String(rawPermission.(string)),
+				}
+				grants = append(grants, g)
+			}
+		}
+
+		grantsInput := &s3.PutBucketAclInput{
+			Bucket: aws.String(bucket),
+			AccessControlPolicy: &s3.AccessControlPolicy{
+				Grants: grants,
+				Owner:  ap.Owner,
+			},
+		}
+
+		log.Printf("[DEBUG] S3 bucket: %s, put Grants: %#v", bucket, grantsInput)
+
+		_, err = retryOnAwsCode("NoSuchBucket", func() (interface{}, error) {
+			return s3conn.PutBucketAcl(grantsInput)
+		})
+
+		if err != nil {
+			return fmt.Errorf("Error putting S3 Grants: %s", err)
+		}
+	}
 	return nil
 }
 
@@ -1533,7 +1689,7 @@ func resourceAwsS3BucketWebsiteDelete(s3conn *s3.S3, d *schema.ResourceData) err
 	return nil
 }
 
-func websiteEndpoint(s3conn *s3.S3, d *schema.ResourceData) (*S3Website, error) {
+func websiteEndpoint(client *AWSClient, d *schema.ResourceData) (*S3Website, error) {
 	// If the bucket doesn't have a website configuration, return an empty
 	// endpoint
 	if _, ok := d.GetOk("website"); !ok {
@@ -1545,7 +1701,7 @@ func websiteEndpoint(s3conn *s3.S3, d *schema.ResourceData) (*S3Website, error) 
 	// Lookup the region for this bucket
 
 	locationResponse, err := retryOnAwsCode(s3.ErrCodeNoSuchBucket, func() (interface{}, error) {
-		return s3conn.GetBucketLocation(
+		return client.s3conn.GetBucketLocation(
 			&s3.GetBucketLocationInput{
 				Bucket: aws.String(bucket),
 			},
@@ -1560,11 +1716,7 @@ func websiteEndpoint(s3conn *s3.S3, d *schema.ResourceData) (*S3Website, error) 
 		region = *location.LocationConstraint
 	}
 
-	return WebsiteEndpoint(bucket, region), nil
-}
-
-func bucketDomainName(bucket string) string {
-	return fmt.Sprintf("%s.s3.amazonaws.com", bucket)
+	return WebsiteEndpoint(client, bucket, region), nil
 }
 
 // https://docs.aws.amazon.com/general/latest/gr/rande.html#s3_region
@@ -1572,7 +1724,7 @@ func BucketRegionalDomainName(bucket string, region string) (string, error) {
 	// Return a default AWS Commercial domain name if no region is provided
 	// Otherwise EndpointFor() will return BUCKET.s3..amazonaws.com
 	if region == "" {
-		return fmt.Sprintf("%s.s3.amazonaws.com", bucket), nil
+		return fmt.Sprintf("%s.s3.amazonaws.com", bucket), nil //lintignore:AWSR001
 	}
 	endpoint, err := endpoints.DefaultResolver().EndpointFor(endpoints.S3ServiceID, region)
 	if err != nil {
@@ -1581,24 +1733,21 @@ func BucketRegionalDomainName(bucket string, region string) (string, error) {
 	return fmt.Sprintf("%s.%s", bucket, strings.TrimPrefix(endpoint.URL, "https://")), nil
 }
 
-func WebsiteEndpoint(bucket string, region string) *S3Website {
-	domain := WebsiteDomainUrl(region)
+func WebsiteEndpoint(client *AWSClient, bucket string, region string) *S3Website {
+	domain := WebsiteDomainUrl(client, region)
 	return &S3Website{Endpoint: fmt.Sprintf("%s.%s", bucket, domain), Domain: domain}
 }
 
-func WebsiteDomainUrl(region string) string {
+func WebsiteDomainUrl(client *AWSClient, region string) string {
 	region = normalizeRegion(region)
 
 	// Different regions have different syntax for website endpoints
 	// https://docs.aws.amazon.com/AmazonS3/latest/dev/WebsiteEndpoints.html
 	// https://docs.aws.amazon.com/general/latest/gr/rande.html#s3_website_region_endpoints
 	if isOldRegion(region) {
-		return fmt.Sprintf("s3-website-%s.amazonaws.com", region)
+		return fmt.Sprintf("s3-website-%s.amazonaws.com", region) //lintignore:AWSR001
 	}
-	if partition, ok := endpoints.PartitionForRegion(endpoints.DefaultPartitions(), region); ok && partition.ID() == endpoints.AwsCnPartitionID {
-		return fmt.Sprintf("s3-website.%s.amazonaws.com.cn", region)
-	}
-	return fmt.Sprintf("s3-website.%s.amazonaws.com", region)
+	return client.RegionalHostname(fmt.Sprintf("s3-website"))
 }
 
 func isOldRegion(region string) bool {
@@ -1769,12 +1918,7 @@ func resourceAwsS3BucketServerSideEncryptionConfigurationUpdate(s3conn *s3.S3, d
 			Bucket: aws.String(bucket),
 		}
 
-		err := resource.Retry(1*time.Minute, func() *resource.RetryError {
-			if _, err := s3conn.DeleteBucketEncryption(i); err != nil {
-				return resource.NonRetryableError(err)
-			}
-			return nil
-		})
+		_, err := s3conn.DeleteBucketEncryption(i)
 		if err != nil {
 			return fmt.Errorf("error removing S3 bucket server side encryption: %s", err)
 		}
@@ -1848,12 +1992,7 @@ func resourceAwsS3BucketReplicationConfigurationUpdate(s3conn *s3.S3, d *schema.
 			Bucket: aws.String(bucket),
 		}
 
-		err := resource.Retry(1*time.Minute, func() *resource.RetryError {
-			if _, err := s3conn.DeleteBucketReplication(i); err != nil {
-				return resource.NonRetryableError(err)
-			}
-			return nil
-		})
+		_, err := s3conn.DeleteBucketReplication(i)
 		if err != nil {
 			return fmt.Errorf("Error removing S3 bucket replication: %s", err)
 		}
@@ -1946,11 +2085,11 @@ func resourceAwsS3BucketReplicationConfigurationUpdate(s3conn *s3.S3, d *schema.
 			rcRule.Priority = aws.Int64(int64(rr["priority"].(int)))
 			rcRule.Filter = &s3.ReplicationRuleFilter{}
 			filter := f[0].(map[string]interface{})
-			tags := filter["tags"].(map[string]interface{})
+			tags := keyvaluetags.New(filter["tags"]).IgnoreAws().S3Tags()
 			if len(tags) > 0 {
 				rcRule.Filter.And = &s3.ReplicationRuleAndOperator{
 					Prefix: aws.String(filter["prefix"].(string)),
-					Tags:   tagsFromMapS3(tags),
+					Tags:   tags,
 				}
 			} else {
 				rcRule.Filter.Prefix = aws.String(filter["prefix"].(string))
@@ -1974,15 +2113,18 @@ func resourceAwsS3BucketReplicationConfigurationUpdate(s3conn *s3.S3, d *schema.
 	log.Printf("[DEBUG] S3 put bucket replication configuration: %#v", i)
 
 	err := resource.Retry(1*time.Minute, func() *resource.RetryError {
-		if _, err := s3conn.PutBucketReplication(i); err != nil {
-			if isAWSErr(err, s3.ErrCodeNoSuchBucket, "") ||
-				isAWSErr(err, "InvalidRequest", "Versioning must be 'Enabled' on the bucket") {
-				return resource.RetryableError(err)
-			}
+		_, err := s3conn.PutBucketReplication(i)
+		if isAWSErr(err, s3.ErrCodeNoSuchBucket, "") || isAWSErr(err, "InvalidRequest", "Versioning must be 'Enabled' on the bucket") {
+			return resource.RetryableError(err)
+		}
+		if err != nil {
 			return resource.NonRetryableError(err)
 		}
 		return nil
 	})
+	if isResourceTimeoutError(err) {
+		_, err = s3conn.PutBucketReplication(i)
+	}
 	if err != nil {
 		return fmt.Errorf("Error putting S3 replication configuration: %s", err)
 	}
@@ -2000,12 +2142,7 @@ func resourceAwsS3BucketLifecycleUpdate(s3conn *s3.S3, d *schema.ResourceData) e
 			Bucket: aws.String(bucket),
 		}
 
-		err := resource.Retry(1*time.Minute, func() *resource.RetryError {
-			if _, err := s3conn.DeleteBucketLifecycle(i); err != nil {
-				return resource.NonRetryableError(err)
-			}
-			return nil
-		})
+		_, err := s3conn.DeleteBucketLifecycle(i)
 		if err != nil {
 			return fmt.Errorf("Error removing S3 lifecycle: %s", err)
 		}
@@ -2020,12 +2157,12 @@ func resourceAwsS3BucketLifecycleUpdate(s3conn *s3.S3, d *schema.ResourceData) e
 		rule := &s3.LifecycleRule{}
 
 		// Filter
-		tags := r["tags"].(map[string]interface{})
+		tags := keyvaluetags.New(r["tags"]).IgnoreAws().S3Tags()
 		filter := &s3.LifecycleRuleFilter{}
 		if len(tags) > 0 {
 			lifecycleRuleAndOp := &s3.LifecycleRuleAndOperator{}
 			lifecycleRuleAndOp.SetPrefix(r["prefix"].(string))
-			lifecycleRuleAndOp.SetTags(tagsFromMapS3(tags))
+			lifecycleRuleAndOp.SetTags(tags)
 			filter.SetAnd(lifecycleRuleAndOp)
 		} else {
 			filter.SetPrefix(r["prefix"].(string))
@@ -2239,11 +2376,11 @@ func flattenAwsS3BucketReplicationConfiguration(r *s3.ReplicationConfiguration) 
 				m["prefix"] = aws.StringValue(f.Prefix)
 			}
 			if t := f.Tag; t != nil {
-				m["tags"] = tagsMapToRaw(tagsToMapS3([]*s3.Tag{t}))
+				m["tags"] = keyvaluetags.S3KeyValueTags([]*s3.Tag{t}).IgnoreAws().Map()
 			}
 			if a := f.And; a != nil {
 				m["prefix"] = aws.StringValue(a.Prefix)
-				m["tags"] = tagsMapToRaw(tagsToMapS3(a.Tags))
+				m["tags"] = keyvaluetags.S3KeyValueTags(a.Tags).IgnoreAws().Map()
 			}
 			t["filter"] = []interface{}{m}
 		}
@@ -2344,9 +2481,37 @@ func validateS3BucketName(value string, region string) error {
 	return nil
 }
 
+func grantHash(v interface{}) int {
+	var buf bytes.Buffer
+	m, ok := v.(map[string]interface{})
+
+	if !ok {
+		return 0
+	}
+
+	if v, ok := m["id"]; ok {
+		buf.WriteString(fmt.Sprintf("%s-", v.(string)))
+	}
+	if v, ok := m["type"]; ok {
+		buf.WriteString(fmt.Sprintf("%s-", v.(string)))
+	}
+	if v, ok := m["uri"]; ok {
+		buf.WriteString(fmt.Sprintf("%s-", v.(string)))
+	}
+	if p, ok := m["permissions"]; ok {
+		buf.WriteString(fmt.Sprintf("%v-", p.(*schema.Set).List()))
+	}
+	return hashcode.String(buf.String())
+}
+
 func expirationHash(v interface{}) int {
 	var buf bytes.Buffer
-	m := v.(map[string]interface{})
+	m, ok := v.(map[string]interface{})
+
+	if !ok {
+		return 0
+	}
+
 	if v, ok := m["date"]; ok {
 		buf.WriteString(fmt.Sprintf("%s-", v.(string)))
 	}
@@ -2361,7 +2526,12 @@ func expirationHash(v interface{}) int {
 
 func transitionHash(v interface{}) int {
 	var buf bytes.Buffer
-	m := v.(map[string]interface{})
+	m, ok := v.(map[string]interface{})
+
+	if !ok {
+		return 0
+	}
+
 	if v, ok := m["date"]; ok {
 		buf.WriteString(fmt.Sprintf("%s-", v.(string)))
 	}
@@ -2376,7 +2546,11 @@ func transitionHash(v interface{}) int {
 
 func rulesHash(v interface{}) int {
 	var buf bytes.Buffer
-	m := v.(map[string]interface{})
+	m, ok := v.(map[string]interface{})
+
+	if !ok {
+		return 0
+	}
 
 	if v, ok := m["id"]; ok {
 		buf.WriteString(fmt.Sprintf("%s-", v.(string)))
@@ -2404,19 +2578,28 @@ func rulesHash(v interface{}) int {
 
 func replicationRuleFilterHash(v interface{}) int {
 	var buf bytes.Buffer
-	m := v.(map[string]interface{})
+	m, ok := v.(map[string]interface{})
+
+	if !ok {
+		return 0
+	}
+
 	if v, ok := m["prefix"]; ok {
 		buf.WriteString(fmt.Sprintf("%s-", v.(string)))
 	}
 	if v, ok := m["tags"]; ok {
-		buf.WriteString(fmt.Sprintf("%d-", tagsMapToHash(v.(map[string]interface{}))))
+		buf.WriteString(fmt.Sprintf("%d-", keyvaluetags.New(v).Hash()))
 	}
 	return hashcode.String(buf.String())
 }
 
 func destinationHash(v interface{}) int {
 	var buf bytes.Buffer
-	m := v.(map[string]interface{})
+	m, ok := v.(map[string]interface{})
+
+	if !ok {
+		return 0
+	}
 
 	if v, ok := m["bucket"]; ok {
 		buf.WriteString(fmt.Sprintf("%s-", v.(string)))
@@ -2437,12 +2620,12 @@ func destinationHash(v interface{}) int {
 }
 
 func accessControlTranslationHash(v interface{}) int {
-	// v is nil if empty access_control_translation is given.
-	if v == nil {
+	var buf bytes.Buffer
+	m, ok := v.(map[string]interface{})
+
+	if !ok {
 		return 0
 	}
-	var buf bytes.Buffer
-	m := v.(map[string]interface{})
 
 	if v, ok := m["owner"]; ok {
 		buf.WriteString(fmt.Sprintf("%s-", v.(string)))
@@ -2451,12 +2634,12 @@ func accessControlTranslationHash(v interface{}) int {
 }
 
 func sourceSelectionCriteriaHash(v interface{}) int {
-	// v is nil if empty source_selection_criteria is given.
-	if v == nil {
+	var buf bytes.Buffer
+	m, ok := v.(map[string]interface{})
+
+	if !ok {
 		return 0
 	}
-	var buf bytes.Buffer
-	m := v.(map[string]interface{})
 
 	if v, ok := m["sse_kms_encrypted_objects"].(*schema.Set); ok && v.Len() > 0 {
 		buf.WriteString(fmt.Sprintf("%d-", sourceSseKmsObjectsHash(v.List()[0])))
@@ -2466,7 +2649,11 @@ func sourceSelectionCriteriaHash(v interface{}) int {
 
 func sourceSseKmsObjectsHash(v interface{}) int {
 	var buf bytes.Buffer
-	m := v.(map[string]interface{})
+	m, ok := v.(map[string]interface{})
+
+	if !ok {
+		return 0
+	}
 
 	if v, ok := m["enabled"]; ok {
 		buf.WriteString(fmt.Sprintf("%t-", v.(bool)))
@@ -2482,13 +2669,18 @@ type S3Website struct {
 // S3 Object Lock functions.
 //
 
-func readS3ObjectLockConfiguration(conn *s3.S3, bucket string) (interface{}, error) {
+func readS3ObjectLockConfiguration(conn *s3.S3, bucket string) ([]interface{}, error) {
 	resp, err := retryOnAwsCode(s3.ErrCodeNoSuchBucket, func() (interface{}, error) {
 		return conn.GetObjectLockConfiguration(&s3.GetObjectLockConfigurationInput{
 			Bucket: aws.String(bucket),
 		})
 	})
 	if err != nil {
+		// Certain S3 implementations do not include this API
+		if isAWSErr(err, "MethodNotAllowed", "") {
+			return nil, nil
+		}
+
 		if isAWSErr(err, "ObjectLockConfigurationNotFoundError", "") {
 			return nil, nil
 		}
@@ -2560,4 +2752,44 @@ func flattenS3ObjectLockConfiguration(conf *s3.ObjectLockConfiguration) []interf
 	}
 
 	return []interface{}{mConf}
+}
+
+func flattenGrants(ap *s3.GetBucketAclOutput) []interface{} {
+	//if ACL grants contains bucket owner FULL_CONTROL only - it is default "private" acl
+	if len(ap.Grants) == 1 && aws.StringValue(ap.Grants[0].Grantee.ID) == aws.StringValue(ap.Owner.ID) &&
+		aws.StringValue(ap.Grants[0].Permission) == s3.PermissionFullControl {
+		return nil
+	}
+
+	getGrant := func(grants []interface{}, grantee map[string]interface{}) (interface{}, bool) {
+		for _, pg := range grants {
+			pgt := pg.(map[string]interface{})
+			if pgt["type"] == grantee["type"] && pgt["id"] == grantee["id"] && pgt["uri"] == grantee["uri"] &&
+				pgt["permissions"].(*schema.Set).Len() > 0 {
+				return pg, true
+			}
+		}
+		return nil, false
+	}
+
+	grants := make([]interface{}, 0, len(ap.Grants))
+	for _, granteeObject := range ap.Grants {
+		grantee := make(map[string]interface{})
+		grantee["type"] = aws.StringValue(granteeObject.Grantee.Type)
+
+		if granteeObject.Grantee.ID != nil {
+			grantee["id"] = aws.StringValue(granteeObject.Grantee.ID)
+		}
+		if granteeObject.Grantee.URI != nil {
+			grantee["uri"] = aws.StringValue(granteeObject.Grantee.URI)
+		}
+		if pg, ok := getGrant(grants, grantee); ok {
+			pg.(map[string]interface{})["permissions"].(*schema.Set).Add(aws.StringValue(granteeObject.Permission))
+		} else {
+			grantee["permissions"] = schema.NewSet(schema.HashString, []interface{}{aws.StringValue(granteeObject.Permission)})
+			grants = append(grants, grantee)
+		}
+	}
+
+	return grants
 }

@@ -9,10 +9,82 @@ import (
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/cloudtrail"
-	"github.com/hashicorp/terraform/helper/acctest"
-	"github.com/hashicorp/terraform/helper/resource"
-	"github.com/hashicorp/terraform/terraform"
+	"github.com/hashicorp/go-multierror"
+	"github.com/hashicorp/terraform-plugin-sdk/helper/acctest"
+	"github.com/hashicorp/terraform-plugin-sdk/helper/resource"
+	"github.com/hashicorp/terraform-plugin-sdk/terraform"
 )
+
+func init() {
+	resource.AddTestSweepers("aws_cloudtrail", &resource.Sweeper{
+		Name: "aws_cloudtrail",
+		F:    testSweepCloudTrails,
+	})
+}
+
+func testSweepCloudTrails(region string) error {
+	client, err := sharedClientForRegion(region)
+	if err != nil {
+		return fmt.Errorf("error getting client: %w", err)
+	}
+	conn := client.(*AWSClient).cloudtrailconn
+	var sweeperErrs *multierror.Error
+
+	err = conn.ListTrailsPages(&cloudtrail.ListTrailsInput{}, func(page *cloudtrail.ListTrailsOutput, isLast bool) bool {
+		if page == nil {
+			return !isLast
+		}
+
+		for _, trail := range page.Trails {
+			name := aws.StringValue(trail.Name)
+
+			output, err := conn.DescribeTrails(&cloudtrail.DescribeTrailsInput{
+				TrailNameList: aws.StringSlice([]string{name}),
+			})
+			if err != nil {
+				sweeperErr := fmt.Errorf("error describing CloudTrail (%s): %w", name, err)
+				log.Printf("[ERROR] %s", sweeperErr)
+				sweeperErrs = multierror.Append(sweeperErrs, sweeperErr)
+				continue
+			}
+
+			if len(output.TrailList) == 0 {
+				log.Printf("[INFO] CloudTrail (%s) not found, skipping", name)
+				continue
+			}
+
+			if aws.BoolValue(output.TrailList[0].IsOrganizationTrail) {
+				log.Printf("[INFO] CloudTrail (%s) is an organization trail, skipping", name)
+				continue
+			}
+
+			log.Printf("[INFO] Deleting CloudTrail: %s", name)
+			_, err = conn.DeleteTrail(&cloudtrail.DeleteTrailInput{
+				Name: aws.String(name),
+			})
+			if isAWSErr(err, cloudtrail.ErrCodeTrailNotFoundException, "") {
+				continue
+			}
+			if err != nil {
+				sweeperErr := fmt.Errorf("error deleting CloudTrail (%s): %w", name, err)
+				log.Printf("[ERROR] %s", sweeperErr)
+				sweeperErrs = multierror.Append(sweeperErrs, sweeperErr)
+				continue
+			}
+		}
+
+		return !isLast
+	})
+	if testSweepSkipSweepError(err) {
+		log.Printf("[WARN] Skipping CloudTrail sweep for %s: %s", region, err)
+		return sweeperErrs.ErrorOrNil() // In case we have completed some pages, but had errors
+	}
+	if err != nil {
+		sweeperErrs = multierror.Append(sweeperErrs, fmt.Errorf("error retrieving CloudTrails: %w", err))
+	}
+
+	return sweeperErrs.ErrorOrNil()
+}
 
 func TestAccAWSCloudTrail(t *testing.T) {
 	testCases := map[string]map[string]func(t *testing.T){
@@ -46,6 +118,7 @@ func TestAccAWSCloudTrail(t *testing.T) {
 func testAccAWSCloudTrail_basic(t *testing.T) {
 	var trail cloudtrail.Trail
 	cloudTrailRandInt := acctest.RandInt()
+	resourceName := "aws_cloudtrail.foobar"
 
 	resource.Test(t, resource.TestCase{
 		PreCheck:     func() { testAccPreCheck(t) },
@@ -55,26 +128,26 @@ func testAccAWSCloudTrail_basic(t *testing.T) {
 			{
 				Config: testAccAWSCloudTrailConfig(cloudTrailRandInt),
 				Check: resource.ComposeTestCheckFunc(
-					testAccCheckCloudTrailExists("aws_cloudtrail.foobar", &trail),
-					resource.TestCheckResourceAttr("aws_cloudtrail.foobar", "include_global_service_events", "true"),
-					resource.TestCheckResourceAttr("aws_cloudtrail.foobar", "is_organization_trail", "false"),
-					testAccCheckCloudTrailLogValidationEnabled("aws_cloudtrail.foobar", false, &trail),
-					testAccCheckCloudTrailKmsKeyIdEquals("aws_cloudtrail.foobar", "", &trail),
+					testAccCheckCloudTrailExists(resourceName, &trail),
+					resource.TestCheckResourceAttr(resourceName, "include_global_service_events", "true"),
+					resource.TestCheckResourceAttr(resourceName, "is_organization_trail", "false"),
+					testAccCheckCloudTrailLogValidationEnabled(resourceName, false, &trail),
+					testAccCheckCloudTrailKmsKeyIdEquals(resourceName, "", &trail),
 				),
 			},
 			{
-				ResourceName:      "aws_cloudtrail.foobar",
+				ResourceName:      resourceName,
 				ImportState:       true,
 				ImportStateVerify: true,
 			},
 			{
 				Config: testAccAWSCloudTrailConfigModified(cloudTrailRandInt),
 				Check: resource.ComposeTestCheckFunc(
-					testAccCheckCloudTrailExists("aws_cloudtrail.foobar", &trail),
-					resource.TestCheckResourceAttr("aws_cloudtrail.foobar", "s3_key_prefix", "/prefix"),
-					resource.TestCheckResourceAttr("aws_cloudtrail.foobar", "include_global_service_events", "false"),
-					testAccCheckCloudTrailLogValidationEnabled("aws_cloudtrail.foobar", false, &trail),
-					testAccCheckCloudTrailKmsKeyIdEquals("aws_cloudtrail.foobar", "", &trail),
+					testAccCheckCloudTrailExists(resourceName, &trail),
+					resource.TestCheckResourceAttr(resourceName, "s3_key_prefix", "prefix"),
+					resource.TestCheckResourceAttr(resourceName, "include_global_service_events", "false"),
+					testAccCheckCloudTrailLogValidationEnabled(resourceName, false, &trail),
+					testAccCheckCloudTrailKmsKeyIdEquals(resourceName, "", &trail),
 				),
 			},
 		},
@@ -84,6 +157,7 @@ func testAccAWSCloudTrail_basic(t *testing.T) {
 func testAccAWSCloudTrail_cloudwatch(t *testing.T) {
 	var trail cloudtrail.Trail
 	randInt := acctest.RandInt()
+	resourceName := "aws_cloudtrail.test"
 
 	resource.Test(t, resource.TestCase{
 		PreCheck:     func() { testAccPreCheck(t) },
@@ -93,22 +167,22 @@ func testAccAWSCloudTrail_cloudwatch(t *testing.T) {
 			{
 				Config: testAccAWSCloudTrailConfigCloudWatch(randInt),
 				Check: resource.ComposeTestCheckFunc(
-					testAccCheckCloudTrailExists("aws_cloudtrail.test", &trail),
-					resource.TestCheckResourceAttrSet("aws_cloudtrail.test", "cloud_watch_logs_group_arn"),
-					resource.TestCheckResourceAttrSet("aws_cloudtrail.test", "cloud_watch_logs_role_arn"),
+					testAccCheckCloudTrailExists(resourceName, &trail),
+					resource.TestCheckResourceAttrSet(resourceName, "cloud_watch_logs_group_arn"),
+					resource.TestCheckResourceAttrSet(resourceName, "cloud_watch_logs_role_arn"),
 				),
 			},
 			{
-				ResourceName:      "aws_cloudtrail.test",
+				ResourceName:      resourceName,
 				ImportState:       true,
 				ImportStateVerify: true,
 			},
 			{
 				Config: testAccAWSCloudTrailConfigCloudWatchModified(randInt),
 				Check: resource.ComposeTestCheckFunc(
-					testAccCheckCloudTrailExists("aws_cloudtrail.test", &trail),
-					resource.TestCheckResourceAttrSet("aws_cloudtrail.test", "cloud_watch_logs_group_arn"),
-					resource.TestCheckResourceAttrSet("aws_cloudtrail.test", "cloud_watch_logs_role_arn"),
+					testAccCheckCloudTrailExists(resourceName, &trail),
+					resource.TestCheckResourceAttrSet(resourceName, "cloud_watch_logs_group_arn"),
+					resource.TestCheckResourceAttrSet(resourceName, "cloud_watch_logs_role_arn"),
 				),
 			},
 		},
@@ -118,6 +192,7 @@ func testAccAWSCloudTrail_cloudwatch(t *testing.T) {
 func testAccAWSCloudTrail_enable_logging(t *testing.T) {
 	var trail cloudtrail.Trail
 	cloudTrailRandInt := acctest.RandInt()
+	resourceName := "aws_cloudtrail.foobar"
 
 	resource.Test(t, resource.TestCase{
 		PreCheck:     func() { testAccPreCheck(t) },
@@ -127,35 +202,35 @@ func testAccAWSCloudTrail_enable_logging(t *testing.T) {
 			{
 				Config: testAccAWSCloudTrailConfig(cloudTrailRandInt),
 				Check: resource.ComposeTestCheckFunc(
-					testAccCheckCloudTrailExists("aws_cloudtrail.foobar", &trail),
+					testAccCheckCloudTrailExists(resourceName, &trail),
 					// AWS will create the trail with logging turned off.
 					// Test that "enable_logging" default works.
-					testAccCheckCloudTrailLoggingEnabled("aws_cloudtrail.foobar", true, &trail),
-					testAccCheckCloudTrailLogValidationEnabled("aws_cloudtrail.foobar", false, &trail),
-					testAccCheckCloudTrailKmsKeyIdEquals("aws_cloudtrail.foobar", "", &trail),
+					testAccCheckCloudTrailLoggingEnabled(resourceName, true),
+					testAccCheckCloudTrailLogValidationEnabled(resourceName, false, &trail),
+					testAccCheckCloudTrailKmsKeyIdEquals(resourceName, "", &trail),
 				),
 			},
 			{
-				ResourceName:      "aws_cloudtrail.foobar",
+				ResourceName:      resourceName,
 				ImportState:       true,
 				ImportStateVerify: true,
 			},
 			{
 				Config: testAccAWSCloudTrailConfigModified(cloudTrailRandInt),
 				Check: resource.ComposeTestCheckFunc(
-					testAccCheckCloudTrailExists("aws_cloudtrail.foobar", &trail),
-					testAccCheckCloudTrailLoggingEnabled("aws_cloudtrail.foobar", false, &trail),
-					testAccCheckCloudTrailLogValidationEnabled("aws_cloudtrail.foobar", false, &trail),
-					testAccCheckCloudTrailKmsKeyIdEquals("aws_cloudtrail.foobar", "", &trail),
+					testAccCheckCloudTrailExists(resourceName, &trail),
+					testAccCheckCloudTrailLoggingEnabled(resourceName, false),
+					testAccCheckCloudTrailLogValidationEnabled(resourceName, false, &trail),
+					testAccCheckCloudTrailKmsKeyIdEquals(resourceName, "", &trail),
 				),
 			},
 			{
 				Config: testAccAWSCloudTrailConfig(cloudTrailRandInt),
 				Check: resource.ComposeTestCheckFunc(
-					testAccCheckCloudTrailExists("aws_cloudtrail.foobar", &trail),
-					testAccCheckCloudTrailLoggingEnabled("aws_cloudtrail.foobar", true, &trail),
-					testAccCheckCloudTrailLogValidationEnabled("aws_cloudtrail.foobar", false, &trail),
-					testAccCheckCloudTrailKmsKeyIdEquals("aws_cloudtrail.foobar", "", &trail),
+					testAccCheckCloudTrailExists(resourceName, &trail),
+					testAccCheckCloudTrailLoggingEnabled(resourceName, true),
+					testAccCheckCloudTrailLogValidationEnabled(resourceName, false, &trail),
+					testAccCheckCloudTrailKmsKeyIdEquals(resourceName, "", &trail),
 				),
 			},
 		},
@@ -165,6 +240,7 @@ func testAccAWSCloudTrail_enable_logging(t *testing.T) {
 func testAccAWSCloudTrail_is_multi_region(t *testing.T) {
 	var trail cloudtrail.Trail
 	cloudTrailRandInt := acctest.RandInt()
+	resourceName := "aws_cloudtrail.foobar"
 
 	resource.Test(t, resource.TestCase{
 		PreCheck:     func() { testAccPreCheck(t) },
@@ -174,33 +250,33 @@ func testAccAWSCloudTrail_is_multi_region(t *testing.T) {
 			{
 				Config: testAccAWSCloudTrailConfig(cloudTrailRandInt),
 				Check: resource.ComposeTestCheckFunc(
-					testAccCheckCloudTrailExists("aws_cloudtrail.foobar", &trail),
-					resource.TestCheckResourceAttr("aws_cloudtrail.foobar", "is_multi_region_trail", "false"),
-					testAccCheckCloudTrailLogValidationEnabled("aws_cloudtrail.foobar", false, &trail),
-					testAccCheckCloudTrailKmsKeyIdEquals("aws_cloudtrail.foobar", "", &trail),
+					testAccCheckCloudTrailExists(resourceName, &trail),
+					resource.TestCheckResourceAttr(resourceName, "is_multi_region_trail", "false"),
+					testAccCheckCloudTrailLogValidationEnabled(resourceName, false, &trail),
+					testAccCheckCloudTrailKmsKeyIdEquals(resourceName, "", &trail),
 				),
 			},
 			{
 				Config: testAccAWSCloudTrailConfigMultiRegion(cloudTrailRandInt),
 				Check: resource.ComposeTestCheckFunc(
-					testAccCheckCloudTrailExists("aws_cloudtrail.foobar", &trail),
-					resource.TestCheckResourceAttr("aws_cloudtrail.foobar", "is_multi_region_trail", "true"),
-					testAccCheckCloudTrailLogValidationEnabled("aws_cloudtrail.foobar", false, &trail),
-					testAccCheckCloudTrailKmsKeyIdEquals("aws_cloudtrail.foobar", "", &trail),
+					testAccCheckCloudTrailExists(resourceName, &trail),
+					resource.TestCheckResourceAttr(resourceName, "is_multi_region_trail", "true"),
+					testAccCheckCloudTrailLogValidationEnabled(resourceName, false, &trail),
+					testAccCheckCloudTrailKmsKeyIdEquals(resourceName, "", &trail),
 				),
 			},
 			{
-				ResourceName:      "aws_cloudtrail.foobar",
+				ResourceName:      resourceName,
 				ImportState:       true,
 				ImportStateVerify: true,
 			},
 			{
 				Config: testAccAWSCloudTrailConfig(cloudTrailRandInt),
 				Check: resource.ComposeTestCheckFunc(
-					testAccCheckCloudTrailExists("aws_cloudtrail.foobar", &trail),
-					resource.TestCheckResourceAttr("aws_cloudtrail.foobar", "is_multi_region_trail", "false"),
-					testAccCheckCloudTrailLogValidationEnabled("aws_cloudtrail.foobar", false, &trail),
-					testAccCheckCloudTrailKmsKeyIdEquals("aws_cloudtrail.foobar", "", &trail),
+					testAccCheckCloudTrailExists(resourceName, &trail),
+					resource.TestCheckResourceAttr(resourceName, "is_multi_region_trail", "false"),
+					testAccCheckCloudTrailLogValidationEnabled(resourceName, false, &trail),
+					testAccCheckCloudTrailKmsKeyIdEquals(resourceName, "", &trail),
 				),
 			},
 		},
@@ -210,6 +286,7 @@ func testAccAWSCloudTrail_is_multi_region(t *testing.T) {
 func testAccAWSCloudTrail_is_organization(t *testing.T) {
 	var trail cloudtrail.Trail
 	cloudTrailRandInt := acctest.RandInt()
+	resourceName := "aws_cloudtrail.foobar"
 
 	resource.Test(t, resource.TestCase{
 		PreCheck:     func() { testAccPreCheck(t); testAccOrganizationsAccountPreCheck(t) },
@@ -219,24 +296,24 @@ func testAccAWSCloudTrail_is_organization(t *testing.T) {
 			{
 				Config: testAccAWSCloudTrailConfigOrganization(cloudTrailRandInt),
 				Check: resource.ComposeTestCheckFunc(
-					testAccCheckCloudTrailExists("aws_cloudtrail.foobar", &trail),
-					resource.TestCheckResourceAttr("aws_cloudtrail.foobar", "is_organization_trail", "true"),
-					testAccCheckCloudTrailLogValidationEnabled("aws_cloudtrail.foobar", false, &trail),
-					testAccCheckCloudTrailKmsKeyIdEquals("aws_cloudtrail.foobar", "", &trail),
+					testAccCheckCloudTrailExists(resourceName, &trail),
+					resource.TestCheckResourceAttr(resourceName, "is_organization_trail", "true"),
+					testAccCheckCloudTrailLogValidationEnabled(resourceName, false, &trail),
+					testAccCheckCloudTrailKmsKeyIdEquals(resourceName, "", &trail),
 				),
 			},
 			{
-				ResourceName:      "aws_cloudtrail.foobar",
+				ResourceName:      resourceName,
 				ImportState:       true,
 				ImportStateVerify: true,
 			},
 			{
 				Config: testAccAWSCloudTrailConfig(cloudTrailRandInt),
 				Check: resource.ComposeTestCheckFunc(
-					testAccCheckCloudTrailExists("aws_cloudtrail.foobar", &trail),
-					resource.TestCheckResourceAttr("aws_cloudtrail.foobar", "is_organization_trail", "false"),
-					testAccCheckCloudTrailLogValidationEnabled("aws_cloudtrail.foobar", false, &trail),
-					testAccCheckCloudTrailKmsKeyIdEquals("aws_cloudtrail.foobar", "", &trail),
+					testAccCheckCloudTrailExists(resourceName, &trail),
+					resource.TestCheckResourceAttr(resourceName, "is_organization_trail", "false"),
+					testAccCheckCloudTrailLogValidationEnabled(resourceName, false, &trail),
+					testAccCheckCloudTrailKmsKeyIdEquals(resourceName, "", &trail),
 				),
 			},
 		},
@@ -246,6 +323,7 @@ func testAccAWSCloudTrail_is_organization(t *testing.T) {
 func testAccAWSCloudTrail_logValidation(t *testing.T) {
 	var trail cloudtrail.Trail
 	cloudTrailRandInt := acctest.RandInt()
+	resourceName := "aws_cloudtrail.foobar"
 
 	resource.Test(t, resource.TestCase{
 		PreCheck:     func() { testAccPreCheck(t) },
@@ -255,26 +333,26 @@ func testAccAWSCloudTrail_logValidation(t *testing.T) {
 			{
 				Config: testAccAWSCloudTrailConfig_logValidation(cloudTrailRandInt),
 				Check: resource.ComposeTestCheckFunc(
-					testAccCheckCloudTrailExists("aws_cloudtrail.foobar", &trail),
-					resource.TestCheckResourceAttr("aws_cloudtrail.foobar", "s3_key_prefix", ""),
-					resource.TestCheckResourceAttr("aws_cloudtrail.foobar", "include_global_service_events", "true"),
-					testAccCheckCloudTrailLogValidationEnabled("aws_cloudtrail.foobar", true, &trail),
-					testAccCheckCloudTrailKmsKeyIdEquals("aws_cloudtrail.foobar", "", &trail),
+					testAccCheckCloudTrailExists(resourceName, &trail),
+					resource.TestCheckResourceAttr(resourceName, "s3_key_prefix", ""),
+					resource.TestCheckResourceAttr(resourceName, "include_global_service_events", "true"),
+					testAccCheckCloudTrailLogValidationEnabled(resourceName, true, &trail),
+					testAccCheckCloudTrailKmsKeyIdEquals(resourceName, "", &trail),
 				),
 			},
 			{
-				ResourceName:      "aws_cloudtrail.foobar",
+				ResourceName:      resourceName,
 				ImportState:       true,
 				ImportStateVerify: true,
 			},
 			{
 				Config: testAccAWSCloudTrailConfig_logValidationModified(cloudTrailRandInt),
 				Check: resource.ComposeTestCheckFunc(
-					testAccCheckCloudTrailExists("aws_cloudtrail.foobar", &trail),
-					resource.TestCheckResourceAttr("aws_cloudtrail.foobar", "s3_key_prefix", ""),
-					resource.TestCheckResourceAttr("aws_cloudtrail.foobar", "include_global_service_events", "true"),
-					testAccCheckCloudTrailLogValidationEnabled("aws_cloudtrail.foobar", false, &trail),
-					testAccCheckCloudTrailKmsKeyIdEquals("aws_cloudtrail.foobar", "", &trail),
+					testAccCheckCloudTrailExists(resourceName, &trail),
+					resource.TestCheckResourceAttr(resourceName, "s3_key_prefix", ""),
+					resource.TestCheckResourceAttr(resourceName, "include_global_service_events", "true"),
+					testAccCheckCloudTrailLogValidationEnabled(resourceName, false, &trail),
+					testAccCheckCloudTrailKmsKeyIdEquals(resourceName, "", &trail),
 				),
 			},
 		},
@@ -285,6 +363,7 @@ func testAccAWSCloudTrail_kmsKey(t *testing.T) {
 	var trail cloudtrail.Trail
 	cloudTrailRandInt := acctest.RandInt()
 	keyRegex := regexp.MustCompile(`^arn:aws:([a-zA-Z0-9\-])+:([a-z]{2}-[a-z]+-\d{1})?:(\d{12})?:(.*)$`)
+	resourceName := "aws_cloudtrail.foobar"
 
 	resource.Test(t, resource.TestCase{
 		PreCheck:     func() { testAccPreCheck(t) },
@@ -294,15 +373,15 @@ func testAccAWSCloudTrail_kmsKey(t *testing.T) {
 			{
 				Config: testAccAWSCloudTrailConfig_kmsKey(cloudTrailRandInt),
 				Check: resource.ComposeTestCheckFunc(
-					testAccCheckCloudTrailExists("aws_cloudtrail.foobar", &trail),
-					resource.TestCheckResourceAttr("aws_cloudtrail.foobar", "s3_key_prefix", ""),
-					resource.TestCheckResourceAttr("aws_cloudtrail.foobar", "include_global_service_events", "true"),
-					testAccCheckCloudTrailLogValidationEnabled("aws_cloudtrail.foobar", false, &trail),
-					resource.TestMatchResourceAttr("aws_cloudtrail.foobar", "kms_key_id", keyRegex),
+					testAccCheckCloudTrailExists(resourceName, &trail),
+					resource.TestCheckResourceAttr(resourceName, "s3_key_prefix", ""),
+					resource.TestCheckResourceAttr(resourceName, "include_global_service_events", "true"),
+					testAccCheckCloudTrailLogValidationEnabled(resourceName, false, &trail),
+					resource.TestMatchResourceAttr(resourceName, "kms_key_id", keyRegex),
 				),
 			},
 			{
-				ResourceName:      "aws_cloudtrail.foobar",
+				ResourceName:      resourceName,
 				ImportState:       true,
 				ImportStateVerify: true,
 			},
@@ -315,6 +394,7 @@ func testAccAWSCloudTrail_tags(t *testing.T) {
 	var trailTags []*cloudtrail.Tag
 	var trailTagsModified []*cloudtrail.Tag
 	cloudTrailRandInt := acctest.RandInt()
+	resourceName := "aws_cloudtrail.foobar"
 
 	resource.Test(t, resource.TestCase{
 		PreCheck:     func() { testAccPreCheck(t) },
@@ -324,39 +404,41 @@ func testAccAWSCloudTrail_tags(t *testing.T) {
 			{
 				Config: testAccAWSCloudTrailConfig_tags(cloudTrailRandInt),
 				Check: resource.ComposeTestCheckFunc(
-					testAccCheckCloudTrailExists("aws_cloudtrail.foobar", &trail),
-					resource.TestCheckResourceAttr("aws_cloudtrail.foobar", "tags.%", "2"),
+					testAccCheckCloudTrailExists(resourceName, &trail),
+					resource.TestCheckResourceAttr(resourceName, "tags.%", "2"),
 					testAccCheckCloudTrailLoadTags(&trail, &trailTags),
-					testAccCheckCloudTrailCheckTags(&trailTags, map[string]string{"Foo": "moo", "Pooh": "hi"}),
-					testAccCheckCloudTrailLogValidationEnabled("aws_cloudtrail.foobar", false, &trail),
-					testAccCheckCloudTrailKmsKeyIdEquals("aws_cloudtrail.foobar", "", &trail),
+					resource.TestCheckResourceAttr(resourceName, "tags.Foo", "moo"),
+					resource.TestCheckResourceAttr(resourceName, "tags.Pooh", "hi"),
+					testAccCheckCloudTrailLogValidationEnabled(resourceName, false, &trail),
+					testAccCheckCloudTrailKmsKeyIdEquals(resourceName, "", &trail),
 				),
 			},
 			{
-				ResourceName:      "aws_cloudtrail.foobar",
+				ResourceName:      resourceName,
 				ImportState:       true,
 				ImportStateVerify: true,
 			},
 			{
 				Config: testAccAWSCloudTrailConfig_tagsModified(cloudTrailRandInt),
 				Check: resource.ComposeTestCheckFunc(
-					testAccCheckCloudTrailExists("aws_cloudtrail.foobar", &trail),
-					resource.TestCheckResourceAttr("aws_cloudtrail.foobar", "tags.%", "3"),
+					testAccCheckCloudTrailExists(resourceName, &trail),
+					resource.TestCheckResourceAttr(resourceName, "tags.%", "3"),
 					testAccCheckCloudTrailLoadTags(&trail, &trailTagsModified),
-					testAccCheckCloudTrailCheckTags(&trailTagsModified, map[string]string{"Foo": "moo", "Moo": "boom", "Pooh": "hi"}),
-					testAccCheckCloudTrailLogValidationEnabled("aws_cloudtrail.foobar", false, &trail),
-					testAccCheckCloudTrailKmsKeyIdEquals("aws_cloudtrail.foobar", "", &trail),
+					resource.TestCheckResourceAttr(resourceName, "tags.Foo", "moo"),
+					resource.TestCheckResourceAttr(resourceName, "tags.Moo", "boom"),
+					resource.TestCheckResourceAttr(resourceName, "tags.Pooh", "hi"),
+					testAccCheckCloudTrailLogValidationEnabled(resourceName, false, &trail),
+					testAccCheckCloudTrailKmsKeyIdEquals(resourceName, "", &trail),
 				),
 			},
 			{
 				Config: testAccAWSCloudTrailConfig_tagsModifiedAgain(cloudTrailRandInt),
 				Check: resource.ComposeTestCheckFunc(
-					testAccCheckCloudTrailExists("aws_cloudtrail.foobar", &trail),
-					resource.TestCheckResourceAttr("aws_cloudtrail.foobar", "tags.%", "0"),
+					testAccCheckCloudTrailExists(resourceName, &trail),
+					resource.TestCheckResourceAttr(resourceName, "tags.%", "0"),
 					testAccCheckCloudTrailLoadTags(&trail, &trailTagsModified),
-					testAccCheckCloudTrailCheckTags(&trailTagsModified, map[string]string{}),
-					testAccCheckCloudTrailLogValidationEnabled("aws_cloudtrail.foobar", false, &trail),
-					testAccCheckCloudTrailKmsKeyIdEquals("aws_cloudtrail.foobar", "", &trail),
+					testAccCheckCloudTrailLogValidationEnabled(resourceName, false, &trail),
+					testAccCheckCloudTrailKmsKeyIdEquals(resourceName, "", &trail),
 				),
 			},
 		},
@@ -366,6 +448,7 @@ func testAccAWSCloudTrail_tags(t *testing.T) {
 func testAccAWSCloudTrail_include_global_service_events(t *testing.T) {
 	var trail cloudtrail.Trail
 	cloudTrailRandInt := acctest.RandInt()
+	resourceName := "aws_cloudtrail.foobar"
 
 	resource.Test(t, resource.TestCase{
 		PreCheck:     func() { testAccPreCheck(t) },
@@ -375,12 +458,12 @@ func testAccAWSCloudTrail_include_global_service_events(t *testing.T) {
 			{
 				Config: testAccAWSCloudTrailConfig_include_global_service_events(cloudTrailRandInt),
 				Check: resource.ComposeTestCheckFunc(
-					testAccCheckCloudTrailExists("aws_cloudtrail.foobar", &trail),
-					resource.TestCheckResourceAttr("aws_cloudtrail.foobar", "include_global_service_events", "false"),
+					testAccCheckCloudTrailExists(resourceName, &trail),
+					resource.TestCheckResourceAttr(resourceName, "include_global_service_events", "false"),
 				),
 			},
 			{
-				ResourceName:      "aws_cloudtrail.foobar",
+				ResourceName:      resourceName,
 				ImportState:       true,
 				ImportStateVerify: true,
 			},
@@ -390,6 +473,7 @@ func testAccAWSCloudTrail_include_global_service_events(t *testing.T) {
 
 func testAccAWSCloudTrail_event_selector(t *testing.T) {
 	cloudTrailRandInt := acctest.RandInt()
+	resourceName := "aws_cloudtrail.foobar"
 
 	resource.Test(t, resource.TestCase{
 		PreCheck:     func() { testAccPreCheck(t) },
@@ -399,42 +483,42 @@ func testAccAWSCloudTrail_event_selector(t *testing.T) {
 			{
 				Config: testAccAWSCloudTrailConfig_eventSelector(cloudTrailRandInt),
 				Check: resource.ComposeTestCheckFunc(
-					resource.TestCheckResourceAttr("aws_cloudtrail.foobar", "event_selector.#", "1"),
-					resource.TestCheckResourceAttr("aws_cloudtrail.foobar", "event_selector.0.data_resource.#", "1"),
-					resource.TestCheckResourceAttr("aws_cloudtrail.foobar", "event_selector.0.data_resource.0.type", "AWS::S3::Object"),
-					resource.TestCheckResourceAttr("aws_cloudtrail.foobar", "event_selector.0.data_resource.0.values.#", "2"),
-					resource.TestMatchResourceAttr("aws_cloudtrail.foobar", "event_selector.0.data_resource.0.values.0", regexp.MustCompile(`^arn:[^:]+:s3:::.+/foobar$`)),
-					resource.TestMatchResourceAttr("aws_cloudtrail.foobar", "event_selector.0.data_resource.0.values.1", regexp.MustCompile(`^arn:[^:]+:s3:::.+/baz$`)),
-					resource.TestCheckResourceAttr("aws_cloudtrail.foobar", "event_selector.0.include_management_events", "false"),
-					resource.TestCheckResourceAttr("aws_cloudtrail.foobar", "event_selector.0.read_write_type", "ReadOnly"),
+					resource.TestCheckResourceAttr(resourceName, "event_selector.#", "1"),
+					resource.TestCheckResourceAttr(resourceName, "event_selector.0.data_resource.#", "1"),
+					resource.TestCheckResourceAttr(resourceName, "event_selector.0.data_resource.0.type", "AWS::S3::Object"),
+					resource.TestCheckResourceAttr(resourceName, "event_selector.0.data_resource.0.values.#", "2"),
+					resource.TestMatchResourceAttr(resourceName, "event_selector.0.data_resource.0.values.0", regexp.MustCompile(`^arn:[^:]+:s3:::.+/foobar$`)),
+					resource.TestMatchResourceAttr(resourceName, "event_selector.0.data_resource.0.values.1", regexp.MustCompile(`^arn:[^:]+:s3:::.+/baz$`)),
+					resource.TestCheckResourceAttr(resourceName, "event_selector.0.include_management_events", "false"),
+					resource.TestCheckResourceAttr(resourceName, "event_selector.0.read_write_type", "ReadOnly"),
 				),
 			},
 			{
-				ResourceName:      "aws_cloudtrail.foobar",
+				ResourceName:      resourceName,
 				ImportState:       true,
 				ImportStateVerify: true,
 			},
 			{
 				Config: testAccAWSCloudTrailConfig_eventSelectorModified(cloudTrailRandInt),
 				Check: resource.ComposeTestCheckFunc(
-					resource.TestCheckResourceAttr("aws_cloudtrail.foobar", "event_selector.#", "2"),
-					resource.TestCheckResourceAttr("aws_cloudtrail.foobar", "event_selector.0.data_resource.#", "1"),
-					resource.TestCheckResourceAttr("aws_cloudtrail.foobar", "event_selector.0.data_resource.0.type", "AWS::S3::Object"),
-					resource.TestCheckResourceAttr("aws_cloudtrail.foobar", "event_selector.0.data_resource.0.values.#", "2"),
-					resource.TestMatchResourceAttr("aws_cloudtrail.foobar", "event_selector.0.data_resource.0.values.0", regexp.MustCompile(`^arn:[^:]+:s3:::.+/foobar$`)),
-					resource.TestMatchResourceAttr("aws_cloudtrail.foobar", "event_selector.0.data_resource.0.values.1", regexp.MustCompile(`^arn:[^:]+:s3:::.+/baz$`)),
-					resource.TestCheckResourceAttr("aws_cloudtrail.foobar", "event_selector.0.include_management_events", "true"),
-					resource.TestCheckResourceAttr("aws_cloudtrail.foobar", "event_selector.0.read_write_type", "ReadOnly"),
-					resource.TestCheckResourceAttr("aws_cloudtrail.foobar", "event_selector.1.data_resource.#", "2"),
-					resource.TestCheckResourceAttr("aws_cloudtrail.foobar", "event_selector.1.data_resource.0.type", "AWS::S3::Object"),
-					resource.TestCheckResourceAttr("aws_cloudtrail.foobar", "event_selector.1.data_resource.0.values.#", "2"),
-					resource.TestMatchResourceAttr("aws_cloudtrail.foobar", "event_selector.1.data_resource.0.values.0", regexp.MustCompile(`^arn:[^:]+:s3:::.+/tf1$`)),
-					resource.TestMatchResourceAttr("aws_cloudtrail.foobar", "event_selector.1.data_resource.0.values.1", regexp.MustCompile(`^arn:[^:]+:s3:::.+/tf2$`)),
-					resource.TestCheckResourceAttr("aws_cloudtrail.foobar", "event_selector.1.data_resource.1.type", "AWS::Lambda::Function"),
-					resource.TestCheckResourceAttr("aws_cloudtrail.foobar", "event_selector.1.data_resource.1.values.#", "1"),
-					resource.TestMatchResourceAttr("aws_cloudtrail.foobar", "event_selector.1.data_resource.1.values.0", regexp.MustCompile(`^arn:[^:]+:lambda:.+:tf-test-trail-event-select-\d+$`)),
-					resource.TestCheckResourceAttr("aws_cloudtrail.foobar", "event_selector.1.include_management_events", "false"),
-					resource.TestCheckResourceAttr("aws_cloudtrail.foobar", "event_selector.1.read_write_type", "All"),
+					resource.TestCheckResourceAttr(resourceName, "event_selector.#", "2"),
+					resource.TestCheckResourceAttr(resourceName, "event_selector.0.data_resource.#", "1"),
+					resource.TestCheckResourceAttr(resourceName, "event_selector.0.data_resource.0.type", "AWS::S3::Object"),
+					resource.TestCheckResourceAttr(resourceName, "event_selector.0.data_resource.0.values.#", "2"),
+					resource.TestMatchResourceAttr(resourceName, "event_selector.0.data_resource.0.values.0", regexp.MustCompile(`^arn:[^:]+:s3:::.+/foobar$`)),
+					resource.TestMatchResourceAttr(resourceName, "event_selector.0.data_resource.0.values.1", regexp.MustCompile(`^arn:[^:]+:s3:::.+/baz$`)),
+					resource.TestCheckResourceAttr(resourceName, "event_selector.0.include_management_events", "true"),
+					resource.TestCheckResourceAttr(resourceName, "event_selector.0.read_write_type", "ReadOnly"),
+					resource.TestCheckResourceAttr(resourceName, "event_selector.1.data_resource.#", "2"),
+					resource.TestCheckResourceAttr(resourceName, "event_selector.1.data_resource.0.type", "AWS::S3::Object"),
+					resource.TestCheckResourceAttr(resourceName, "event_selector.1.data_resource.0.values.#", "2"),
+					resource.TestMatchResourceAttr(resourceName, "event_selector.1.data_resource.0.values.0", regexp.MustCompile(`^arn:[^:]+:s3:::.+/tf1$`)),
+					resource.TestMatchResourceAttr(resourceName, "event_selector.1.data_resource.0.values.1", regexp.MustCompile(`^arn:[^:]+:s3:::.+/tf2$`)),
+					resource.TestCheckResourceAttr(resourceName, "event_selector.1.data_resource.1.type", "AWS::Lambda::Function"),
+					resource.TestCheckResourceAttr(resourceName, "event_selector.1.data_resource.1.values.#", "1"),
+					resource.TestMatchResourceAttr(resourceName, "event_selector.1.data_resource.1.values.0", regexp.MustCompile(`^arn:[^:]+:lambda:.+:tf-test-trail-event-select-\d+$`)),
+					resource.TestCheckResourceAttr(resourceName, "event_selector.1.include_management_events", "false"),
+					resource.TestCheckResourceAttr(resourceName, "event_selector.1.read_write_type", "All"),
 				),
 			},
 		},
@@ -465,7 +549,7 @@ func testAccCheckCloudTrailExists(n string, trail *cloudtrail.Trail) resource.Te
 	}
 }
 
-func testAccCheckCloudTrailLoggingEnabled(n string, desired bool, trail *cloudtrail.Trail) resource.TestCheckFunc {
+func testAccCheckCloudTrailLoggingEnabled(n string, desired bool) resource.TestCheckFunc {
 	return func(s *terraform.State) error {
 		rs, ok := s.RootModule().Resources[n]
 		if !ok {
@@ -647,7 +731,7 @@ func testAccAWSCloudTrailConfigModified(cloudTrailRandInt int) string {
 resource "aws_cloudtrail" "foobar" {
   name                          = "tf-trail-foobar-%d"
   s3_bucket_name                = "${aws_s3_bucket.foo.id}"
-  s3_key_prefix                 = "/prefix"
+  s3_key_prefix                 = "prefix"
   include_global_service_events = false
   enable_logging                = false
 }
@@ -1387,7 +1471,7 @@ resource "aws_lambda_function" "lambda_function_test" {
   function_name = "tf-test-trail-event-select-%d"
   role          = "${aws_iam_role.iam_for_lambda.arn}"
   handler       = "exports.example"
-  runtime       = "nodejs8.10"
+  runtime       = "nodejs12.x"
 }
 `, cloudTrailRandInt, cloudTrailRandInt, cloudTrailRandInt, cloudTrailRandInt, cloudTrailRandInt, cloudTrailRandInt, cloudTrailRandInt)
 }

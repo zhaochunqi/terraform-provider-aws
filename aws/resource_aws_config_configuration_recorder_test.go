@@ -8,9 +8,9 @@ import (
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/configservice"
-	"github.com/hashicorp/terraform/helper/acctest"
-	"github.com/hashicorp/terraform/helper/resource"
-	"github.com/hashicorp/terraform/terraform"
+	"github.com/hashicorp/terraform-plugin-sdk/helper/acctest"
+	"github.com/hashicorp/terraform-plugin-sdk/helper/resource"
+	"github.com/hashicorp/terraform-plugin-sdk/terraform"
 )
 
 func init() {
@@ -82,8 +82,6 @@ func testAccConfigConfigurationRecorder_basic(t *testing.T) {
 					testAccCheckConfigConfigurationRecorderRoleArn("aws_config_configuration_recorder.foo",
 						regexp.MustCompile(`arn:aws:iam::[0-9]{12}:role/`+expectedRoleName), &cr),
 					resource.TestCheckResourceAttr("aws_config_configuration_recorder.foo", "name", expectedName),
-					resource.TestMatchResourceAttr("aws_config_configuration_recorder.foo", "role_arn",
-						regexp.MustCompile(`arn:aws:iam::[0-9]{12}:role/`+expectedRoleName)),
 				),
 			},
 		},
@@ -109,8 +107,6 @@ func testAccConfigConfigurationRecorder_allParams(t *testing.T) {
 					testAccCheckConfigConfigurationRecorderRoleArn("aws_config_configuration_recorder.foo",
 						regexp.MustCompile(`arn:aws:iam::[0-9]{12}:role/`+expectedRoleName), &cr),
 					resource.TestCheckResourceAttr("aws_config_configuration_recorder.foo", "name", expectedName),
-					resource.TestMatchResourceAttr("aws_config_configuration_recorder.foo", "role_arn",
-						regexp.MustCompile(`arn:aws:iam::[0-9]{12}:role/`+expectedRoleName)),
 					resource.TestCheckResourceAttr("aws_config_configuration_recorder.foo", "recording_group.#", "1"),
 					resource.TestCheckResourceAttr("aws_config_configuration_recorder.foo", "recording_group.0.all_supported", "false"),
 					resource.TestCheckResourceAttr("aws_config_configuration_recorder.foo", "recording_group.0.include_global_resource_types", "false"),
