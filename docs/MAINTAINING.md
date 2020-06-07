@@ -42,11 +42,11 @@ Notes for each type of pull request are (or will be) available in subsections be
 This pull request appears to be related to/solve #1234, so I have edited the pull request description to denote the issue reference.
 ```
 
-- Review the contents of the pull request and ensure the change follows the relevant section of the [Contributing Guide](https://github.com/terraform-providers/terraform-provider-aws/blob/master/.github/CONTRIBUTING.md#checklists-for-contribution)
+- Review the contents of the pull request and ensure the change follows the relevant section of the [Contributing Guide](contributing/contribution-checklists.md)
 - If the change is not acceptable, leave a long form comment about the reasoning and close the pull request
 - If the change is acceptable with modifications, leave a pull request review marked using the `Request Changes` option (for maintainer pull requests with minor modification requests, giving feedback with the `Approve` option is recommended so they do not need to wait for another round of review)
 - If the author is unresponsive for changes (by default we give two weeks), determine importance and level of effort to finish the pull request yourself including their commits or close the pull request
-- Run relevant acceptance testing ([locally](https://github.com/terraform-providers/terraform-provider-aws/blob/master/.github/CONTRIBUTING.md#running-an-acceptance-test) or in TeamCity) against AWS Commercial and AWS GovCloud (US) to ensure no new failures are being introduced
+- Run relevant acceptance testing ([locally](contributing/running-and-writing-acceptance-tests.md#running-an-acceptance-test) or in TeamCity) against AWS Commercial and AWS GovCloud (US) to ensure no new failures are being introduced
 - Approve the pull request with a comment outlining what steps you took that ensure the change is acceptable, e.g. acceptance testing output
 
 ``````markdown
@@ -181,7 +181,7 @@ ENHANCEMENTS:
 * provider: Support automatic region validation for `XX-XXXXX-#` [GH-####]
 ```
 
-- Follow the [Contributing Guide](https://github.com/terraform-providers/terraform-provider-aws/blob/master/.github/CONTRIBUTING.md#new-region) to submit updates for various data sources to support the new region
+- Follow the [Contributing Guide](contributing/contribution-checklists.md#new-region) to submit updates for various data sources to support the new region
 - Submit the dependency update to the Terraform S3 Backend by running the following:
 
 ```shell
