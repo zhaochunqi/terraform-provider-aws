@@ -8,9 +8,9 @@ import (
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/elbv2"
-	"github.com/hashicorp/terraform-plugin-sdk/helper/acctest"
-	"github.com/hashicorp/terraform-plugin-sdk/helper/resource"
-	"github.com/hashicorp/terraform-plugin-sdk/terraform"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/acctest"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/terraform"
 )
 
 func TestLBListenerARNFromRuleARN(t *testing.T) {
@@ -64,10 +64,10 @@ func TestAccAWSLBListenerRule_basic(t *testing.T) {
 	targetGroupResourceName := "aws_lb_target_group.test"
 
 	resource.ParallelTest(t, resource.TestCase{
-		PreCheck:            func() { testAccPreCheck(t) },
-		Providers:           testAccProviders,
-		CheckDestroy:        testAccCheckAWSLBListenerRuleDestroy,
-		DisableBinaryDriver: true,
+		PreCheck:     func() { testAccPreCheck(t) },
+		Providers:    testAccProviders,
+		CheckDestroy: testAccCheckAWSLBListenerRuleDestroy,
+
 		Steps: []resource.TestStep{
 			{
 				Config: testAccAWSLBListenerRuleConfig_basic(lbName, targetGroupName),
@@ -189,10 +189,10 @@ func TestAccAWSLBListenerRuleBackwardsCompatibility(t *testing.T) {
 	targetGroupResourceName := "aws_alb_target_group.test"
 
 	resource.ParallelTest(t, resource.TestCase{
-		PreCheck:            func() { testAccPreCheck(t) },
-		Providers:           testAccProviders,
-		CheckDestroy:        testAccCheckAWSLBListenerRuleDestroy,
-		DisableBinaryDriver: true,
+		PreCheck:     func() { testAccPreCheck(t) },
+		Providers:    testAccProviders,
+		CheckDestroy: testAccCheckAWSLBListenerRuleDestroy,
+
 		Steps: []resource.TestStep{
 			{
 				Config: testAccAWSLBListenerRuleConfigBackwardsCompatibility(lbName, targetGroupName),
@@ -678,10 +678,10 @@ func TestAccAWSLBListenerRule_conditionHostHeader(t *testing.T) {
 	frontEndListenerResourceName := "aws_lb_listener.front_end"
 
 	resource.ParallelTest(t, resource.TestCase{
-		PreCheck:            func() { testAccPreCheck(t) },
-		Providers:           testAccProviders,
-		CheckDestroy:        testAccCheckAWSLBListenerRuleDestroy,
-		DisableBinaryDriver: true,
+		PreCheck:     func() { testAccPreCheck(t) },
+		Providers:    testAccProviders,
+		CheckDestroy: testAccCheckAWSLBListenerRuleDestroy,
+
 		Steps: []resource.TestStep{
 			{
 				Config: testAccAWSLBListenerRuleConfig_conditionHostHeader(lbName),
@@ -719,10 +719,10 @@ func TestAccAWSLBListenerRule_conditionHostHeader_deprecated(t *testing.T) {
 	frontEndListenerResourceName := "aws_lb_listener.front_end"
 
 	resource.ParallelTest(t, resource.TestCase{
-		PreCheck:            func() { testAccPreCheck(t) },
-		Providers:           testAccProviders,
-		CheckDestroy:        testAccCheckAWSLBListenerRuleDestroy,
-		DisableBinaryDriver: true,
+		PreCheck:     func() { testAccPreCheck(t) },
+		Providers:    testAccProviders,
+		CheckDestroy: testAccCheckAWSLBListenerRuleDestroy,
+
 		Steps: []resource.TestStep{
 			{
 				Config: testAccAWSLBListenerRuleConfig_conditionHostHeader_deprecated(lbName),
@@ -758,10 +758,10 @@ func TestAccAWSLBListenerRule_conditionHttpHeader(t *testing.T) {
 	frontEndListenerResourceName := "aws_lb_listener.front_end"
 
 	resource.ParallelTest(t, resource.TestCase{
-		PreCheck:            func() { testAccPreCheck(t) },
-		Providers:           testAccProviders,
-		CheckDestroy:        testAccCheckAWSLBListenerRuleDestroy,
-		DisableBinaryDriver: true,
+		PreCheck:     func() { testAccPreCheck(t) },
+		Providers:    testAccProviders,
+		CheckDestroy: testAccCheckAWSLBListenerRuleDestroy,
+
 		Steps: []resource.TestStep{
 			{
 				Config: testAccAWSLBListenerRuleConfig_conditionHttpHeader(lbName),
@@ -823,10 +823,10 @@ func TestAccAWSLBListenerRule_conditionHttpRequestMethod(t *testing.T) {
 	frontEndListenerResourceName := "aws_lb_listener.front_end"
 
 	resource.ParallelTest(t, resource.TestCase{
-		PreCheck:            func() { testAccPreCheck(t) },
-		Providers:           testAccProviders,
-		CheckDestroy:        testAccCheckAWSLBListenerRuleDestroy,
-		DisableBinaryDriver: true,
+		PreCheck:     func() { testAccPreCheck(t) },
+		Providers:    testAccProviders,
+		CheckDestroy: testAccCheckAWSLBListenerRuleDestroy,
+
 		Steps: []resource.TestStep{
 			{
 				Config: testAccAWSLBListenerRuleConfig_conditionHttpRequestMethod(lbName),
@@ -862,10 +862,10 @@ func TestAccAWSLBListenerRule_conditionPathPattern(t *testing.T) {
 	frontEndListenerResourceName := "aws_lb_listener.front_end"
 
 	resource.ParallelTest(t, resource.TestCase{
-		PreCheck:            func() { testAccPreCheck(t) },
-		Providers:           testAccProviders,
-		CheckDestroy:        testAccCheckAWSLBListenerRuleDestroy,
-		DisableBinaryDriver: true,
+		PreCheck:     func() { testAccPreCheck(t) },
+		Providers:    testAccProviders,
+		CheckDestroy: testAccCheckAWSLBListenerRuleDestroy,
+
 		Steps: []resource.TestStep{
 			{
 				Config: testAccAWSLBListenerRuleConfig_conditionPathPattern(lbName),
@@ -903,10 +903,10 @@ func TestAccAWSLBListenerRule_conditionPathPattern_deprecated(t *testing.T) {
 	frontEndListenerResourceName := "aws_lb_listener.front_end"
 
 	resource.ParallelTest(t, resource.TestCase{
-		PreCheck:            func() { testAccPreCheck(t) },
-		Providers:           testAccProviders,
-		CheckDestroy:        testAccCheckAWSLBListenerRuleDestroy,
-		DisableBinaryDriver: true,
+		PreCheck:     func() { testAccPreCheck(t) },
+		Providers:    testAccProviders,
+		CheckDestroy: testAccCheckAWSLBListenerRuleDestroy,
+
 		Steps: []resource.TestStep{
 			{
 				Config: testAccAWSLBListenerRuleConfig_conditionPathPattern_deprecated(lbName),
@@ -942,10 +942,10 @@ func TestAccAWSLBListenerRule_conditionUpdatePathPattern_deprecated(t *testing.T
 	frontEndListenerResourceName := "aws_lb_listener.front_end"
 
 	resource.ParallelTest(t, resource.TestCase{
-		PreCheck:            func() { testAccPreCheck(t) },
-		Providers:           testAccProviders,
-		CheckDestroy:        testAccCheckAWSLBListenerRuleDestroy,
-		DisableBinaryDriver: true,
+		PreCheck:     func() { testAccPreCheck(t) },
+		Providers:    testAccProviders,
+		CheckDestroy: testAccCheckAWSLBListenerRuleDestroy,
+
 		Steps: []resource.TestStep{
 			{
 				Config: testAccAWSLBListenerRuleConfig_conditionPathPattern_deprecated(lbName),
@@ -1002,10 +1002,10 @@ func TestAccAWSLBListenerRule_conditionQueryString(t *testing.T) {
 	frontEndListenerResourceName := "aws_lb_listener.front_end"
 
 	resource.ParallelTest(t, resource.TestCase{
-		PreCheck:            func() { testAccPreCheck(t) },
-		Providers:           testAccProviders,
-		CheckDestroy:        testAccCheckAWSLBListenerRuleDestroy,
-		DisableBinaryDriver: true,
+		PreCheck:     func() { testAccPreCheck(t) },
+		Providers:    testAccProviders,
+		CheckDestroy: testAccCheckAWSLBListenerRuleDestroy,
+
 		Steps: []resource.TestStep{
 			{
 				Config: testAccAWSLBListenerRuleConfig_conditionQueryString(lbName),
@@ -1054,10 +1054,10 @@ func TestAccAWSLBListenerRule_conditionSourceIp(t *testing.T) {
 	frontEndListenerResourceName := "aws_lb_listener.front_end"
 
 	resource.ParallelTest(t, resource.TestCase{
-		PreCheck:            func() { testAccPreCheck(t) },
-		Providers:           testAccProviders,
-		CheckDestroy:        testAccCheckAWSLBListenerRuleDestroy,
-		DisableBinaryDriver: true,
+		PreCheck:     func() { testAccPreCheck(t) },
+		Providers:    testAccProviders,
+		CheckDestroy: testAccCheckAWSLBListenerRuleDestroy,
+
 		Steps: []resource.TestStep{
 			{
 				Config: testAccAWSLBListenerRuleConfig_conditionSourceIp(lbName),
@@ -1093,10 +1093,10 @@ func TestAccAWSLBListenerRule_conditionUpdateMixed(t *testing.T) {
 	frontEndListenerResourceName := "aws_lb_listener.front_end"
 
 	resource.ParallelTest(t, resource.TestCase{
-		PreCheck:            func() { testAccPreCheck(t) },
-		Providers:           testAccProviders,
-		CheckDestroy:        testAccCheckAWSLBListenerRuleDestroy,
-		DisableBinaryDriver: true,
+		PreCheck:     func() { testAccPreCheck(t) },
+		Providers:    testAccProviders,
+		CheckDestroy: testAccCheckAWSLBListenerRuleDestroy,
+
 		Steps: []resource.TestStep{
 			{
 				Config: testAccAWSLBListenerRuleConfig_conditionMixed(lbName),
@@ -1164,10 +1164,10 @@ func TestAccAWSLBListenerRule_conditionMultiple(t *testing.T) {
 	frontEndListenerResourceName := "aws_lb_listener.front_end"
 
 	resource.ParallelTest(t, resource.TestCase{
-		PreCheck:            func() { testAccPreCheck(t) },
-		Providers:           testAccProviders,
-		CheckDestroy:        testAccCheckAWSLBListenerRuleDestroy,
-		DisableBinaryDriver: true,
+		PreCheck:     func() { testAccPreCheck(t) },
+		Providers:    testAccProviders,
+		CheckDestroy: testAccCheckAWSLBListenerRuleDestroy,
+
 		Steps: []resource.TestStep{
 			{
 				Config: testAccAWSLBListenerRuleConfig_conditionMultiple(lbName),
@@ -1245,10 +1245,10 @@ func TestAccAWSLBListenerRule_conditionUpdateMultiple(t *testing.T) {
 	frontEndListenerResourceName := "aws_lb_listener.front_end"
 
 	resource.ParallelTest(t, resource.TestCase{
-		PreCheck:            func() { testAccPreCheck(t) },
-		Providers:           testAccProviders,
-		CheckDestroy:        testAccCheckAWSLBListenerRuleDestroy,
-		DisableBinaryDriver: true,
+		PreCheck:     func() { testAccPreCheck(t) },
+		Providers:    testAccProviders,
+		CheckDestroy: testAccCheckAWSLBListenerRuleDestroy,
+
 		Steps: []resource.TestStep{
 			{
 				Config: testAccAWSLBListenerRuleConfig_conditionMultiple(lbName),
